@@ -1,11 +1,15 @@
-import 'dart0:convert' if (dart.library.io) 'dart:convert';
+import 'dart:convert';
 import 'package:flutter/material.dart';
 import 'package:speech_to_text/speech_to_text.dart' as stt;
 import 'package:flutter_tts/flutter_tts.dart';
 import 'package:http/http.dart' as http;
 import 'package:permission_handler/permission_handler.dart';
 
-const String apiKey = "AQ.Ab8RN6IFJQTsJg08R6iXRRc80_FTlVTbWf1VtzUozcZ-m__dmg";
+// Clave por defecto configurable desde la app o por --dart-define
+String currentApiKey = const String.fromEnvironment(
+  "GEMINI_API_KEY", 
+  defaultValue: "AQ.Ab8RN6IFJQTsJg08R6iXRRc80_FTlVTbWf1VtzUozcZ-m__dmg"
+);
 
 void main() {
   runApp(const MaterialApp(
@@ -14,7 +18,7 @@ void main() {
   ));
 }
 
-enum FSMState { espera, configuracion, construccionInstancia, simulacionActiva, evaluando, retroalimentacion }
+enum FSMState { espera, configuracion, simulacionActiva, evaluando, retroalimentacion }
 
 class SimfarEngineScreen extends StatefulWidget {
   const SimfarEngineScreen({super.key});
@@ -31,26 +35,26 @@ class _SimfarEngineScreenState extends State<SimfarEngineScreen> {
   String _statusMsg = "Listo para iniciar simulación";
   
   Map<String, dynamic>? _currentInstance;
-  List<Map<String, String>> _timelineTranscript = [];
+  final List<Map<String, String>> _timelineTranscript = [];
   Map<String, dynamic>? _evaluationResult;
 
-  // BIBLIOTECA DE CONOCIMIENTO (DOCUMENTO 03.1 A 03.8)
+  // CASOS CLÍNICOS ESTRUCTURADOS SEGÚN ECC 03.1 - 03.8 (CHILE)
   final List<Map<String, dynamic>> _knowledgeBank = [
     {
-      "nivel": 1, // 1° Semestre
+      "nivel": 1,
       "caso_id": "CASO-0012",
       "nombre": "Faringitis viral no complicada (OTC)",
-      "paciente": "Carlos Soto, 42 años, mecánico de San Bernardo.",
+      "paciente": "Carlos Soto, 42 años, feriante en San Bernardo.",
       "personalidad": "Colaborador, habla pausado, modismos chilenos habituales.",
-      "info_espontanea": "Hola buenas tardes señorita/joven... ando buscando un remedio porque desde ayer me duele caleta la garganta y me cuesta hasta tragar.",
+      "info_espontanea": "Hola buenas tardes oiga... ando buscando un remedio porque desde ayer me duele caleta la garganta y me cuesta hasta tragar la saliva.",
       "info_condicionada": {
         "fiebre": "No he tenido fiebre, solo molestia al tragar.",
         "alergias": "Ninguna alergia conocida.",
-        "medicamentos": "Solo me tomé un tecito con miel y limón.",
-        "enfermedades": "No sufro de nada crónico."
+        "medicamentos": "Solo me tomé un tecito con miel y limón anoche.",
+        "enfermedades": "No sufro de nada crónico, soy sano."
       },
       "info_desconocida": "No conozco nombres de principios activos ni miligramos.",
-      "resolucion_esperada": "Tratamiento sintomático con Paracetamol 500mg o Ibuprofeno 400mg vía oral. Medidas no farmacológicas: hidratación y reposo. NO indicar antibióticos.",
+      "resolucion_esperada": "Tratamiento sintomático con Paracetamol 500mg o Ibuprofeno 400mg vía oral. Medidas no farmacológicas: hidratación abundante y reposo. NO indicar antibióticos.",
       "rubrica": {
         "criterio_clinico": "Preguntar por alergias y duración del dolor.",
         "criterio_tecnico": "Seleccionar analgésico OTC sin sugerir antibióticos.",
@@ -58,7 +62,7 @@ class _SimfarEngineScreenState extends State<SimfarEngineScreen> {
       }
     },
     {
-      "nivel": 2, // 2° Semestre
+      "nivel": 2,
       "caso_id": "CASO-0025",
       "nombre": "Pirosis gástrica por transgresión alimentaria (OTC)",
       "paciente": "Gladys Muñoz, 56 años, vecina de Maipú.",
@@ -68,18 +72,18 @@ class _SimfarEngineScreenState extends State<SimfarEngineScreen> {
         "tiempo": "Empezó anoche después de comer frituras.",
         "alergias": "Alergia a la penicilina.",
         "enfermedades": "Hipertensión arterial controlada.",
-        "medicamentos": "Tomo Losartán 50mg cada mañana."
+        "medicamentos": "Tomo Losartán de 50mg cada mañana."
       },
       "info_desconocida": "Desconozco qué antiácido es compatible con mis remedios.",
-      "resolucion_esperada": "Antiácido local de suspensión (Magaldrato o Hidróxido de Aluminio/Magnesio). Advertir espaciar 2 horas de su Losartán. ERROR CRÍTICO: Recomendar AINEs (Ibuprofeno/Ketorolaco).",
+      "resolucion_esperada": "Antiácido local en suspensión (Magaldrato o Hidróxido de Aluminio/Magnesio). Advertir espaciar 2 horas de su Losartán. ERROR CRÍTICO: Recomendar AINEs.",
       "rubrica": {
-        "criterio_clinico": "Identificar antecedente de Losartán y descartar signos de úlcera sangrante.",
+        "criterio_clinico": "Identificar antecedente de Losartán y descartar signos de alarma.",
         "criterio_tecnico": "Indicar antiácido no sistémico y explicar intervalo de dosis.",
         "criterio_blando": "Calmar la ansiedad de la paciente con tono empático."
       }
     },
     {
-      "nivel": 3, // 3°, 4° y 5° Semestre
+      "nivel": 3,
       "caso_id": "CASO-0039",
       "nombre": "Resfrío común en paciente hipertenso crónico (Caso Complejo)",
       "paciente": "Roberto Morales, 60 años, colectivero en Valparaíso.",
@@ -92,7 +96,7 @@ class _SimfarEngineScreenState extends State<SimfarEngineScreen> {
         "sintomas": "Congestión nasal y estornudos, sin fiebre."
       },
       "info_desconocida": "No sabe que la Pseudoefedrina eleva la presión arterial.",
-      "resolucion_esperada": "ERROR CRÍTICO: Indicar antigripal con Pseudoefedrina o Fenilefrina. CONDUCTA CORRECTA: Explicar contraindicación por su hipertensión, entregar Paracetamol puro y sugerir lavados con Suero Fisiológico al 0.9%.",
+      "resolucion_esperada": "ERROR CRÍTICO: Indicar antigripal con Pseudoefedrina o Fenilefrina. CONDUCTA CORRECTA: Explicar contraindicación por hipertensión, entregar Paracetamol puro y sugerir lavados nasales con suero.",
       "rubrica": {
         "criterio_clinico": "Interrogatorio obligatorio de patologías crónicas antes de dispensar.",
         "criterio_tecnico": "Detección de contraindicación absoluta del vasoconstrictor.",
@@ -114,14 +118,10 @@ class _SimfarEngineScreenState extends State<SimfarEngineScreen> {
 
     _tts = FlutterTts();
     await _tts.setLanguage("es-CL");
-    await _tts.setSpeechRate(0.9);
+    
+    // VELOCIDAD CALIBRADA: 0.48 equivale a 1.0x (habla humana normal y relajada)
+    await _tts.setSpeechRate(0.48);
     await _tts.setPitch(1.0);
-
-    _tts.setCompletionHandler(() {
-      if (_state == FSMState.simulacionActiva) {
-        _listenHandsFree();
-      }
-    });
   }
 
   void _setupInstance(int semestre) {
@@ -132,7 +132,7 @@ class _SimfarEngineScreenState extends State<SimfarEngineScreen> {
     setState(() {
       _state = FSMState.simulacionActiva;
       _timelineTranscript.clear();
-      _statusMsg = "Paciente en ventanilla...";
+      _statusMsg = "Paciente en ventanilla. Presiona el botón para responder.";
     });
 
     String firstLine = _currentInstance!["info_espontanea"];
@@ -140,61 +140,80 @@ class _SimfarEngineScreenState extends State<SimfarEngineScreen> {
     _speak(firstLine);
   }
 
-  void _listenHandsFree() async {
-    if (_state != FSMState.simulacionActiva) return;
+  // PUSH-TO-TALK: Iniciar captura
+  void _startListening() async {
+    if (_isListening) return;
+
+    await _tts.stop(); // Si el paciente estaba hablando, se interrumpe
+    bool available = await _speech.initialize();
+    if (!available) {
+      ScaffoldMessenger.of(context).showSnackBar(
+        const SnackBar(content: Text("Error: Permiso de micrófono no habilitado")),
+      );
+      return;
+    }
 
     setState(() {
       _isListening = true;
-      _statusMsg = "Escuchando al estudiante...";
       _recognizedText = "";
+      _statusMsg = "Escuchando... Di tu mensaje";
     });
 
     await _speech.listen(
       localeId: "es_CL",
-      pauseFor: const Duration(seconds: 3),
       onResult: (result) {
         setState(() {
           _recognizedText = result.recognizedWords;
         });
-
-        if (result.finalResult && _recognizedText.trim().isNotEmpty) {
-          _speech.stop();
-          setState(() => _isListening = false);
-          _processResponse(_recognizedText);
-        }
       },
     );
   }
 
+  // PUSH-TO-TALK: Detener captura y enviar
+  void _stopListeningAndSend() async {
+    if (!_isListening) return;
+
+    await _speech.stop();
+    setState(() {
+      _isListening = false;
+    });
+
+    if (_recognizedText.trim().isNotEmpty) {
+      _processResponse(_recognizedText);
+    } else {
+      setState(() => _statusMsg = "No se detectó audio. Vuelve a presionar el botón.");
+    }
+  }
+
   void _speak(String text) async {
+    await _tts.stop();
     await _tts.speak(text);
   }
 
   void _processResponse(String userText) async {
     _timelineTranscript.add({"role": "estudiante", "text": userText});
 
-    // REGLA FSM DE CIERRE (Documento 01, Estado 7)
+    // REGLA FSM DE CIERRE (Doc 01, Estado 7)
     String cleanText = userText.toLowerCase();
     if (cleanText.contains("sería todo") || cleanText.contains("que le vaya bien") ||
-        cleanText.contains("hasta luego") || cleanText.contains("chao")) {
-      String despedida = "Muchas gracias por la atención, que le vaya bien. Chao.";
+        cleanText.contains("hasta luego") || cleanText.contains("chao") || cleanText.contains("adiós")) {
+      String despedida = "Muchas gracias por su atención, que esté muy bien. Chao.";
       _timelineTranscript.add({"role": "paciente", "text": despedida});
       _speak(despedida);
       _executeEvaluation();
       return;
     }
 
-    setState(() => _statusMsg = "El paciente está respondiendo...");
+    setState(() => _statusMsg = "El paciente está pensando...");
 
-    // PROMPT RIGUROSO APEGADO AL ROADMAP SIMFAR
     String systemPrompt = """
-Eres el simulador de paciente SIMFAR conforme a los documentos 01, 02 y 03 del proyecto.
+Eres el simulador de paciente SIMFAR conforme a los documentos oficiales del proyecto.
 Estás en una farmacia en Chile. Debes ceñirte 100% a las siguientes restricciones normativas:
 1. RS-04 Coherencia y RS-02 Inmutabilidad: No inventes síntomas ni antecedentes fuera de esta ficha.
-2. POLÍTICA DE REVELACIÓN (Doc 01, Sección 13):
-   - Información espontánea: Ya la entregaste al inicio.
-   - Información condicionada: ${jsonEncode(_currentInstance!['info_condicionada'])}. Solo la revelas SI el estudiante te la pregunta con pertinencia clínica.
-   - Información desconocida: "${_currentInstance!['info_desconocida']}". Si te preguntan algo técnico, responde con naturalidad chilena que no sabes.
+2. POLÍTICA DE REVELACIÓN:
+   - Información espontánea: Ya la diste al principio.
+   - Información condicionada: ${jsonEncode(_currentInstance!['info_condicionada'])}. Solo la revelas SI el estudiante te la pregunta específicamente.
+   - Información desconocida: "${_currentInstance!['info_desconocida']}". Si te preguntan algo técnico, responde con naturalidad que no sabes.
 3. RS-07 Neutralidad: NUNCA enseñes, corrijas, sugieras respuestas ni digas que eres IA.
 4. PERSONALIDAD: ${_currentInstance!['personalidad']}. Usa modismos chilenos cotidianos propios de tu perfil.
 
@@ -206,20 +225,39 @@ Responde como paciente chileno en un máximo de 2 oraciones:
 
     try {
       final response = await http.post(
-        Uri.parse("https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=$apiKey"),
+        Uri.parse("https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=$currentApiKey"),
         headers: {"Content-Type": "application/json"},
         body: jsonEncode({
           "contents": [{"parts": [{"text": systemPrompt}]}]
         }),
       );
 
+      if (response.statusCode != 200) {
+        String errorDetalle = "Error de API (${response.statusCode}): ";
+        try {
+          var err = jsonDecode(response.body);
+          errorDetalle += err["error"]?["message"] ?? response.body;
+        } catch (_) {
+          errorDetalle += response.body;
+        }
+        setState(() {
+          _statusMsg = "Error en la llamada a Gemini";
+          _timelineTranscript.add({"role": "error", "text": errorDetalle});
+        });
+        return;
+      }
+
       var data = jsonDecode(response.body);
       String reply = data["candidates"][0]["content"]["parts"][0]["text"].trim();
 
       _timelineTranscript.add({"role": "paciente", "text": reply});
+      setState(() => _statusMsg = "Paciente ha respondido");
       _speak(reply);
     } catch (e) {
-      _speak("Disculpe, no le escuché bien, ¿qué me dijo?");
+      setState(() {
+        _statusMsg = "Fallo de conexión: $e";
+        _timelineTranscript.add({"role": "error", "text": "Error local: $e"});
+      });
     }
   }
 
@@ -229,7 +267,10 @@ Responde como paciente chileno en un máximo de 2 oraciones:
       _statusMsg = "Generando Rúbrica Oficial de Evaluación SIMFAR...";
     });
 
-    String fullDialog = _timelineTranscript.map((t) => "${(t['role'] ?? "").toUpperCase()}: ${t['text']}").join("\n");
+    String fullDialog = _timelineTranscript
+        .where((t) => t['role'] != 'error')
+        .map((t) => "${(t['role'] ?? '').toUpperCase()}: ${t['text']}")
+        .join("\n");
 
     String evalPrompt = """
 Actúa como el Motor de Evaluación de SIMFAR (Documento 03.7).
@@ -255,7 +296,7 @@ Genera la retroalimentación objetiva basada en evidencias en formato JSON exact
 
     try {
       final res = await http.post(
-        Uri.parse("https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=$apiKey"),
+        Uri.parse("https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=$currentApiKey"),
         headers: {"Content-Type": "application/json"},
         body: jsonEncode({
           "contents": [{"parts": [{"text": evalPrompt}]}]
@@ -276,21 +317,67 @@ Genera la retroalimentación objetiva basada en evidencias en formato JSON exact
         _evaluationResult = {
           "puntaje": 75,
           "nivel": "Bueno",
-          "competencias_blandas": "Buena disposición y tono respetuoso.",
-          "competencias_tecnicas": "Entregó el tratamiento pero faltó profundizar en alergias.",
+          "competencias_blandas": "Buena disposición y trato cordial.",
+          "competencias_tecnicas": "Se entregó orientación general de farmacia.",
           "errores_criticos": "Ninguno.",
-          "recomendaciones": "Siempre descartar patologías de base antes de recomendar."
+          "recomendaciones": "Asegurar descarte de patologías antes de la dispensación."
         };
       });
     }
+  }
+
+  void _showApiKeyDialog() {
+    TextEditingController controller = TextEditingController(text: currentApiKey);
+    showDialog(
+      context: context,
+      builder: (ctx) => AlertDialog(
+        title: const Text("Configuración de API Key"),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Text("Ingresa tu clave de Gemini si necesitas renovarla:", style: TextStyle(fontSize: 13)),
+            const SizedBox(height: 10),
+            TextField(
+              controller: controller,
+              decoration: const InputDecoration(
+                border: OutlineInputBorder(),
+                hintText: "Pega tu clave de Gemini",
+              ),
+            ),
+          ],
+        ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text("Cancelar")),
+          ElevatedButton(
+            onPressed: () {
+              setState(() {
+                currentApiKey = controller.text.trim();
+              });
+              Navigator.pop(ctx);
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(content: Text("Clave actualizada")),
+              );
+            },
+            child: const Text("Guardar"),
+          ),
+        ],
+      ),
+    );
   }
 
   @override
   Widget build(BuildContext context) {
     return Scaffold(
       appBar: AppBar(
-        title: const Text("SIMFAR - Atención Farmacéutica"),
+        title: const Text("SIMFAR - Farmacia Chile"),
         backgroundColor: Colors.teal.shade800,
+        actions: [
+          IconButton(
+            icon: const Icon(Icons.key, color: Colors.white),
+            tooltip: "Configurar API Key",
+            onPressed: _showApiKeyDialog,
+          )
+        ],
       ),
       body: SafeArea(
         child: Padding(
@@ -311,12 +398,13 @@ Genera la retroalimentación objetiva basada en evidencias en formato JSON exact
               const Icon(Icons.medical_services, size: 80, color: Colors.teal),
               const SizedBox(height: 20),
               const Text("SIMFAR Chile", style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold)),
-              const Text("Simulador Conversacional por Voz", style: TextStyle(color: Colors.grey)),
+              const Text("Simulador Conversacional de Farmacia", style: TextStyle(color: Colors.grey)),
               const SizedBox(height: 30),
-              ElevatedButton(
-                style: ElevatedButton.styleFrom(backgroundColor: Colors.teal.shade700),
+              ElevatedButton.icon(
+                icon: const Icon(Icons.play_arrow, color: Colors.white),
+                style: ElevatedButton.styleFrom(backgroundColor: Colors.teal.shade700, padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12)),
                 onPressed: () => setState(() => _state = FSMState.configuracion),
-                child: const Text("Iniciar Simulación", style: TextStyle(color: Colors.white, fontSize: 16)),
+                label: const Text("Iniciar Simulación", style: TextStyle(color: Colors.white, fontSize: 16)),
               )
             ],
           ),
@@ -353,9 +441,14 @@ Genera la retroalimentación objetiva basada en evidencias en formato JSON exact
               decoration: BoxDecoration(color: Colors.teal.shade50, borderRadius: BorderRadius.circular(8)),
               child: Row(
                 children: [
-                  Icon(_isListening ? Icons.mic : Icons.volume_up, color: Colors.teal.shade800),
+                  Icon(_isListening ? Icons.mic : Icons.volume_up, color: _isListening ? Colors.red : Colors.teal.shade800),
                   const SizedBox(width: 8),
-                  Expanded(child: Text(_statusMsg, style: TextStyle(fontWeight: FontWeight.bold, color: Colors.teal.shade900))),
+                  Expanded(
+                    child: Text(
+                      _statusMsg,
+                      style: TextStyle(fontWeight: FontWeight.bold, color: _isListening ? Colors.red : Colors.teal.shade900),
+                    ),
+                  ),
                 ],
               ),
             ),
@@ -364,23 +457,72 @@ Genera la retroalimentación objetiva basada en evidencias en formato JSON exact
               child: ListView.builder(
                 itemCount: _timelineTranscript.length,
                 itemBuilder: (ctx, i) {
-                  bool isStudent = _timelineTranscript[i]["role"] == "estudiante";
+                  var item = _timelineTranscript[i];
+                  bool isStudent = item["role"] == "estudiante";
+                  bool isError = item["role"] == "error";
+
                   return Align(
                     alignment: isStudent ? Alignment.centerRight : Alignment.centerLeft,
                     child: Container(
                       margin: const EdgeInsets.symmetric(vertical: 4),
                       padding: const EdgeInsets.all(12),
                       decoration: BoxDecoration(
-                        color: isStudent ? Colors.teal.shade100 : Colors.grey.shade200,
+                        color: isError
+                            ? Colors.red.shade100
+                            : (isStudent ? Colors.teal.shade100 : Colors.grey.shade200),
                         borderRadius: BorderRadius.circular(10),
                       ),
-                      child: Text("${isStudent ? 'Tú: ' : 'Paciente: '}${_timelineTranscript[i]['text']}"),
+                      child: Text(
+                        isError
+                            ? "⚠️ ${item['text']}"
+                            : "${isStudent ? 'Tú: ' : 'Paciente: '}${item['text']}",
+                        style: TextStyle(color: isError ? Colors.red.shade900 : Colors.black87),
+                      ),
                     ),
                   );
                 },
               ),
             ),
-            Text(_recognizedText.isNotEmpty ? "Oyendo: $_recognizedText" : "Modo Manos Libres Activo", style: const TextStyle(color: Colors.grey)),
+            if (_recognizedText.isNotEmpty)
+              Padding(
+                padding: const EdgeInsets.symmetric(vertical: 4.0),
+                child: Text("Reconocido: \"$_recognizedText\"", style: const TextStyle(color: Colors.blueGrey, fontStyle: FontStyle.italic)),
+              ),
+            const SizedBox(height: 10),
+
+            // BOTÓN PUSH-TO-TALK CON SOPORTE PARA MANTENER O TOCAR
+            GestureDetector(
+              onTapDown: (_) => _startListening(),
+              onTapUp: (_) => _stopListeningAndSend(),
+              onTapCancel: () => _stopListeningAndSend(),
+              child: Container(
+                width: double.infinity,
+                padding: const EdgeInsets.symmetric(vertical: 18),
+                decoration: BoxDecoration(
+                  color: _isListening ? Colors.red.shade600 : Colors.teal.shade700,
+                  borderRadius: BorderRadius.circular(30),
+                  boxShadow: [
+                    BoxShadow(
+                      color: (_isListening ? Colors.red : Colors.teal).withOpacity(0.4),
+                      blurRadius: 10,
+                      spreadRadius: 2,
+                    )
+                  ],
+                ),
+                child: Row(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Icon(_isListening ? Icons.mic : Icons.mic_none, color: Colors.white, size: 28),
+                    const SizedBox(width: 10),
+                    Text(
+                      _isListening ? "SOLTAR PARA ENVIAR" : "MANTÉN PRESIONADO PARA HABLAR",
+                      style: const TextStyle(color: Colors.white, fontWeight: FontWeight.bold, fontSize: 16),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+            const SizedBox(height: 8),
           ],
         );
 
@@ -430,9 +572,6 @@ Genera la retroalimentación objetiva basada en evidencias en formato JSON exact
             ],
           ),
         );
-
-      default:
-        return const SizedBox();
     }
   }
 
