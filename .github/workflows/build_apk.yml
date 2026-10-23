@@ -9,7 +9,8 @@ jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - name: Descargar repositorio
+        uses: actions/checkout@v4
 
       - name: Configurar Java 17
         uses: actions/setup-java@v4
@@ -17,19 +18,65 @@ jobs:
           distribution: 'temurin'
           java-version: '17'
 
-      - name: Instalar Flutter
+      - name: Instalar Flutter Oficial
         uses: subosito/flutter-action@v2
         with:
           flutter-version: '3.24.0'
           channel: 'stable'
 
-      - name: Descargar dependencias
+      - name: Generar Proyecto Nativo Android
+        run: |
+          # Respaldar archivos de código
+          cp lib/main.dart /tmp/main.dart.bak
+          cp pubspec.yaml /tmp/pubspec.yaml.bak
+          
+          # Regenerar la carpeta android completa y oficial
+          rm -rf android
+          flutter create --platforms=android --org com.simfar.app .
+          
+          # Restaurar los archivos del simulador
+          cp /tmp/main.dart.bak lib/main.dart
+          cp /tmp/pubspec.yaml.bak pubspec.yaml
+
+          # Configurar permisos de micrófono y versiones mínimas de Android
+          python3 -c '
+          with open("android/app/src/main/AndroidManifest.xml", "r") as f:
+              c = f.read()
+          perms = """
+              <uses-permission android:name="android.permission.INTERNET"/>
+              <uses-permission android:name="android.permission.RECORD_AUDIO"/>
+              <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS"/>
+              <uses-permission android:name="android.permission.BLUETOOTH"/>
+          """
+          queries = """
+              <queries>
+                  <intent>
+                      <action android:name="android.speech.RecognitionService" />
+                  </intent>
+              </queries>
+          """
+          c = c.replace("<application", perms + "\n    <application")
+          c = c.replace("</application>", "</application>\n" + queries)
+          with open("android/app/src/main/AndroidManifest.xml", "w") as f:
+              f.write(c)
+
+          with open("android/app/build.gradle", "r") as f:
+              b = f.read()
+          b = b.replace("minSdk = flutter.minSdkVersion", "minSdk = 21")
+          b = b.replace("minSdkVersion flutter.minSdkVersion", "minSdkVersion 21")
+          b = b.replace("compileSdk = flutter.compileSdkVersion", "compileSdk = 34")
+          b = b.replace("compileSdkVersion flutter.compileSdkVersion", "compileSdkVersion 34")
+          with open("android/app/build.gradle", "w") as f:
+              f.write(b)
+          '
+
+      - name: Instalar dependencias
         run: flutter pub get
 
       - name: Compilar APK Release
         run: flutter build apk --release --dart-define=GEMINI_API_KEY=${{ secrets.GEMINI_API_KEY }}
 
-      - name: Subir APK generado
+      - name: Subir APK Terminado
         uses: actions/upload-artifact@v4
         with:
           name: SIMFAR-APK-Chile
