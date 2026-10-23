@@ -229,7 +229,7 @@ Responde como paciente chileno en un máximo de 2 oraciones:
       _statusMsg = "Generando Rúbrica Oficial de Evaluación SIMFAR...";
     });
 
-    String fullDialog = _timelineTranscript.map((t) => "${t['role'].toUpperCase()}: ${t['text']}").join("\n");
+    String fullDialog = _timelineTranscript.map((t) => "${(t['role'] ?? "").toUpperCase()}: ${t['text']}").join("\n");
 
     String evalPrompt = """
 Actúa como el Motor de Evaluación de SIMFAR (Documento 03.7).
