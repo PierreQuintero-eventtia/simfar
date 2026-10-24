@@ -5,8 +5,9 @@ import 'package:flutter_tts/flutter_tts.dart';
 import 'package:http/http.dart' as http;
 import 'package:permission_handler/permission_handler.dart';
 
-// Clave configurable desde la app (boton de llave) o por --dart-define
-String currentApiKey = const String.fromEnvironment("GROQ_API_KEY", defaultValue: "");
+// Configuracion Cloudflare Workers AI
+String cfAccountId = const String.fromEnvironment("CF_ACCOUNT_ID", defaultValue: "");
+String cfApiToken = const String.fromEnvironment("CF_API_TOKEN", defaultValue: "");
 
 void main() {
   runApp(const MaterialApp(
@@ -31,8 +32,8 @@ class _SimfarEngineScreenState extends State<SimfarEngineScreen> {
   String _recognizedText = "";
   String _statusMsg = "Listo para iniciar simulación";
 
-  // Modelo ultra veloz y con soporte nativo de español chileno
-  final String _groqModel = "llama-3.3-70b-versatile";
+  // Modelo oficial estable y ultra veloz de Cloudflare
+  final String _cfModel = "@cf/meta/llama-3.1-8b-instruct";
 
   Map<String, dynamic>? _currentInstance;
   final List<Map<String, String>> _timelineTranscript = [];
@@ -117,40 +118,34 @@ class _SimfarEngineScreenState extends State<SimfarEngineScreen> {
 
     _tts = FlutterTts();
     await _tts.setLanguage("es-CL");
-    await _tts.setSpeechRate(0.48); // Velocidad natural humana (1x)
+    await _tts.setSpeechRate(0.48); // Velocidad de conversación normal
     await _tts.setPitch(1.0);
   }
 
-  // MÉTODO ULTRA VELOZ PARA CONSULTAR A GROQ
-  Future<http.Response> _queryGroq(List<Map<String, String>> messages, {bool isJson = false}) async {
-    if (currentApiKey.trim().isEmpty) {
-      return http.Response('{"error":{"message":"Ingresa tu API Key de Groq tocando la llave 🔑 arriba a la derecha."}}', 401);
+  // CONSULTA DIRECTA A LA GPU DE CLOUDFLARE WORKERS AI
+  Future<http.Response> _queryCloudflare(List<Map<String, String>> messages, {int maxTokens = 250}) async {
+    if (cfAccountId.trim().isEmpty || cfApiToken.trim().isEmpty) {
+      return http.Response('{"error":"Faltan credenciales de Cloudflare. Toca la nube ☁️ arriba."}', 401);
     }
 
-    final Map<String, dynamic> body = {
-      "model": _groqModel,
-      "messages": messages,
-      "temperature": isJson ? 0.2 : 0.6,
-      "max_tokens": isJson ? 600 : 200,
-    };
-
-    if (isJson) {
-      body["response_format"] = {"type": "json_object"};
-    }
+    final url = "https://api.cloudflare.com/client/v4/accounts/${cfAccountId.trim()}/ai/run/$_cfModel";
 
     return await http.post(
-      Uri.parse("https://api.groq.com/openai/v1/chat/completions"),
+      Uri.parse(url),
       headers: {
-        "Authorization": "Bearer ${currentApiKey.trim()}",
+        "Authorization": "Bearer ${cfApiToken.trim()}",
         "Content-Type": "application/json",
       },
-      body: jsonEncode(body),
+      body: jsonEncode({
+        "messages": messages,
+        "max_tokens": maxTokens,
+      }),
     );
   }
 
   void _setupInstance(int semestre) {
-    if (currentApiKey.trim().isEmpty) {
-      _showApiKeyDialog();
+    if (cfAccountId.trim().isEmpty || cfApiToken.trim().isEmpty) {
+      _showConfigDialog();
       return;
     }
 
@@ -230,46 +225,38 @@ class _SimfarEngineScreenState extends State<SimfarEngineScreen> {
       return;
     }
 
-    setState(() => _statusMsg = "El paciente está respondiendo...");
+    setState(() => _statusMsg = "El paciente está pensando...");
 
     String systemPrompt = """
-Eres el simulador de paciente SIMFAR. Estás en una farmacia comunitaria en Chile.
+Eres el simulador de paciente SIMFAR. Estás en una farmacia en Chile.
 NORMAS OBLIGATORIAS:
-1. Responde SIEMPRE Y EXCLUSIVAMENTE en español de Chile con modismos naturales de tu perfil. NUNCA uses inglés.
+1. Responde SIEMPRE Y EXCLUSIVAMENTE en español de Chile con modismos de tu perfil.
 2. POLÍTICA DE REVELACIÓN (Doc 01):
-   - Información espontánea: Ya la diste.
    - Información condicionada: ${jsonEncode(_currentInstance!['info_condicionada'])}. Solo la revelas SI el estudiante te la pregunta específicamente.
-   - Información desconocida: "${_currentInstance!['info_desconocida']}". Si preguntan algo técnico, di con naturalidad chilena que no sabes.
-3. NEUTRALIDAD: NUNCA enseñes, corrijas, sugieras respuestas ni digas que eres IA.
+   - Información desconocida: "${_currentInstance!['info_desconocida']}". Si preguntan algo técnico, responde con naturalidad que no sabes.
+3. NUNCA enseñes, corrijas, sugieras respuestas ni digas que eres IA.
 4. PERSONALIDAD: ${_currentInstance!['personalidad']}.
 
 Ficha del Paciente: ${_currentInstance!['paciente']}
-Responde en 1 o 2 oraciones como el paciente frente a lo que te dice el estudiante de farmacia:
+Responde en 1 o 2 oraciones breves como el paciente:
 """;
 
     try {
-      final response = await _queryGroq([
+      final response = await _queryCloudflare([
         {"role": "system", "content": systemPrompt},
         {"role": "user", "content": userText}
-      ]);
+      ], maxTokens: 200);
 
       if (response.statusCode != 200) {
-        String errorDetalle = "Error (${response.statusCode}): ";
-        try {
-          var err = jsonDecode(response.body);
-          errorDetalle += err["error"]?["message"] ?? response.body;
-        } catch (_) {
-          errorDetalle += response.body;
-        }
         setState(() {
-          _statusMsg = "Error en Groq";
-          _timelineTranscript.add({"role": "error", "text": errorDetalle});
+          _statusMsg = "Error en Cloudflare";
+          _timelineTranscript.add({"role": "error", "text": "Error Cloudflare (${response.statusCode}): ${response.body}"});
         });
         return;
       }
 
       var data = jsonDecode(response.body);
-      String reply = data["choices"][0]["message"]["content"].trim();
+      String reply = data["result"]?["response"]?.trim() ?? "Disculpe, me distraje, ¿qué me dijo?";
 
       _timelineTranscript.add({"role": "paciente", "text": reply});
       setState(() => _statusMsg = "Paciente ha respondido");
@@ -285,7 +272,7 @@ Responde en 1 o 2 oraciones como el paciente frente a lo que te dice el estudian
   void _executeEvaluation() async {
     setState(() {
       _state = FSMState.evaluando;
-      _statusMsg = "Generando Rúbrica Oficial de Evaluación SIMFAR...";
+      _statusMsg = "Generando Rúbrica Oficial SIMFAR en Cloudflare...";
     });
 
     String fullDialog = _timelineTranscript
@@ -304,28 +291,29 @@ RÚBRICA: ${jsonEncode(_currentInstance!['rubrica'])}
 REGISTRO DE CONVERSACIÓN:
 $fullDialog
 
-Debes responder ÚNICAMENTE un JSON con esta estructura exacta:
+Genera un JSON EXACTO con esta estructura y nada más de texto:
 {
   "puntaje": 85,
   "nivel": "Muy Bueno",
   "competencias_blandas": "Evaluación de saludo, cortesía y empatía.",
-  "competencias_tecnicas": "Evaluación de preguntas clínicas, descarte de alergias y fármaco entregado según ISP.",
+  "competencias_tecnicas": "Evaluación de preguntas clínicas y fármaco entregado.",
   "errores_criticos": "Listado de contraindicaciones no advertidas o 'Ninguno'.",
-  "recomendaciones": "Acciones concretas para su próxima simulación en farmacia."
+  "recomendaciones": "Acciones concretas para su próxima simulación."
 }
 """;
 
     try {
-      final res = await _queryGroq([
-        {"role": "system", "content": "Eres un evaluador académico de farmacia. Devuelve exclusivamente JSON válido."},
+      final res = await _queryCloudflare([
+        {"role": "system", "content": "Eres un evaluador académico de farmacia. Devuelve exclusivamente JSON."},
         {"role": "user", "content": evalPrompt}
-      ], isJson: true);
+      ], maxTokens: 600);
 
       var data = jsonDecode(res.body);
-      String rawJson = data["choices"][0]["message"]["content"].trim();
+      String rawText = data["result"]?["response"] ?? "{}";
+      rawText = rawText.replaceAll("```json", "").replaceAll("```", "").trim();
 
       setState(() {
-        _evaluationResult = jsonDecode(rawJson);
+        _evaluationResult = jsonDecode(rawText);
         _state = FSMState.retroalimentacion;
       });
     } catch (e) {
@@ -343,47 +331,53 @@ Debes responder ÚNICAMENTE un JSON con esta estructura exacta:
     }
   }
 
-  void _showApiKeyDialog() {
-    TextEditingController controller = TextEditingController(text: currentApiKey);
+  void _showConfigDialog() {
+    TextEditingController accountController = TextEditingController(text: cfAccountId);
+    TextEditingController tokenController = TextEditingController(text: cfApiToken);
+
     showDialog(
       context: context,
       builder: (ctx) => AlertDialog(
         title: const Row(
           children: [
-            Icon(Icons.vpn_key, color: Colors.teal),
+            Icon(Icons.cloud, color: Colors.orange),
             SizedBox(width: 8),
-            Text("Clave de API de Groq", style: TextStyle(fontSize: 18)),
+            Text("Cloudflare Workers AI", style: TextStyle(fontSize: 18)),
           ],
         ),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            const Text(
-              "Pega aquí tu clave gratuita de Groq (empieza con 'gsk_'):", 
-              style: TextStyle(fontSize: 13)
-            ),
-            const SizedBox(height: 10),
-            TextField(
-              controller: controller,
-              decoration: const InputDecoration(
-                border: OutlineInputBorder(),
-                hintText: "gsk_...",
+        content: SingleChildScrollView(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text("1. Tu Account ID de Cloudflare:", style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13)),
+              const SizedBox(height: 6),
+              TextField(
+                controller: accountController,
+                decoration: const InputDecoration(border: OutlineInputBorder(), hintText: "Account ID"),
               ),
-            ),
-          ],
+              const SizedBox(height: 12),
+              const Text("2. Tu API Token de Workers AI:", style: TextStyle(fontWeight: FontWeight.bold, fontSize: 13)),
+              const SizedBox(height: 6),
+              TextField(
+                controller: tokenController,
+                decoration: const InputDecoration(border: OutlineInputBorder(), hintText: "API Token"),
+              ),
+            ],
+          ),
         ),
         actions: [
           TextButton(onPressed: () => Navigator.pop(ctx), child: const Text("Cancelar")),
           ElevatedButton(
-            style: ElevatedButton.styleFrom(backgroundColor: Colors.teal),
+            style: ElevatedButton.styleFrom(backgroundColor: Colors.orange.shade800),
             onPressed: () {
               setState(() {
-                currentApiKey = controller.text.trim();
+                cfAccountId = accountController.text.trim();
+                cfApiToken = tokenController.text.trim();
               });
               Navigator.pop(ctx);
               ScaffoldMessenger.of(context).showSnackBar(
-                const SnackBar(content: Text("Clave de Groq guardada con éxito")),
+                const SnackBar(content: Text("Credenciales de Cloudflare guardadas")),
               );
             },
             child: const Text("Guardar", style: TextStyle(color: Colors.white)),
@@ -401,9 +395,9 @@ Debes responder ÚNICAMENTE un JSON con esta estructura exacta:
         backgroundColor: Colors.teal.shade800,
         actions: [
           IconButton(
-            icon: const Icon(Icons.vpn_key, color: Colors.white),
-            tooltip: "Configurar Clave Groq",
-            onPressed: _showApiKeyDialog,
+            icon: const Icon(Icons.cloud_queue, color: Colors.white),
+            tooltip: "Configurar Cloudflare",
+            onPressed: _showConfigDialog,
           )
         ],
       ),
@@ -426,26 +420,26 @@ Debes responder ÚNICAMENTE un JSON con esta estructura exacta:
               const Icon(Icons.medical_services, size: 80, color: Colors.teal),
               const SizedBox(height: 20),
               const Text("SIMFAR Chile", style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold)),
-              const Text("Motor: Groq Llama 3.3 (Ultra Rápido)", style: TextStyle(color: Colors.grey)),
+              const Text("Motor: Cloudflare Workers AI (Llama 3.1)", style: TextStyle(color: Colors.grey)),
               const SizedBox(height: 20),
 
-              if (currentApiKey.trim().isEmpty)
+              if (cfAccountId.trim().isEmpty || cfApiToken.trim().isEmpty)
                 Container(
                   margin: const EdgeInsets.symmetric(horizontal: 20),
                   padding: const EdgeInsets.all(12),
                   decoration: BoxDecoration(
-                    color: Colors.amber.shade50,
+                    color: Colors.orange.shade50,
                     borderRadius: BorderRadius.circular(8),
-                    border: Border.all(color: Colors.amber.shade700),
+                    border: Border.all(color: Colors.orange.shade700),
                   ),
                   child: Row(
                     children: [
-                      Icon(Icons.info, color: Colors.amber.shade900),
+                      Icon(Icons.info, color: Colors.orange.shade900),
                       const SizedBox(width: 8),
                       Expanded(
                         child: Text(
-                          "Toca la llave 🔑 arriba a la derecha para ingresar tu clave gratuita de Groq.",
-                          style: TextStyle(color: Colors.amber.shade900, fontSize: 13),
+                          "Toca el ícono de la nube ☁️ arriba para ingresar tu Account ID y Token de Cloudflare.",
+                          style: TextStyle(color: Colors.orange.shade900, fontSize: 13),
                         ),
                       ),
                     ],
@@ -460,8 +454,8 @@ Debes responder ÚNICAMENTE un JSON con esta estructura exacta:
                   padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
                 ),
                 onPressed: () {
-                  if (currentApiKey.trim().isEmpty) {
-                    _showApiKeyDialog();
+                  if (cfAccountId.trim().isEmpty || cfApiToken.trim().isEmpty) {
+                    _showConfigDialog();
                   } else {
                     setState(() => _state = FSMState.configuracion);
                   }
