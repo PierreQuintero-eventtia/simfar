@@ -5,12 +5,8 @@ import 'package:flutter_tts/flutter_tts.dart';
 import 'package:http/http.dart' as http;
 import 'package:permission_handler/permission_handler.dart';
 
-// Clave decodificada en tiempo de ejecucion para evitar bloqueos de GitHub
-final String _injectedKey = utf8.decode(base64.decode("QVEuQWI4Uk42SWxlZFBGcG84TW1HVExOWjktS1JDbU5Ca2VYTXIzTkFCZDJENUM4NGsyLXc="));
-
-String currentApiKey = const String.fromEnvironment("GEMINI_API_KEY", defaultValue: "").isNotEmpty
-    ? const String.fromEnvironment("GEMINI_API_KEY")
-    : _injectedKey;
+// Clave configurable desde la app (boton de llave) o por --dart-define
+String currentApiKey = const String.fromEnvironment("GROQ_API_KEY", defaultValue: "");
 
 void main() {
   runApp(const MaterialApp(
@@ -34,18 +30,9 @@ class _SimfarEngineScreenState extends State<SimfarEngineScreen> {
   bool _isListening = false;
   String _recognizedText = "";
   String _statusMsg = "Listo para iniciar simulación";
-  
-  // SELECTOR DINÁMICO DE MODELOS
-  List<String> _availableModels = [
-    "gemini-2.0-flash",
-    "gemini-1.5-flash",
-    "gemini-1.5-flash-latest",
-    "gemini-1.5-pro",
-    "gemini-2.0-flash-exp",
-  ];
-  String _selectedModel = "gemini-2.0-flash";
-  String _selectedApiVersion = "v1beta";
-  bool _isLoadingModels = false;
+
+  // Modelo ultra veloz y con soporte nativo de español chileno
+  final String _groqModel = "llama-3.3-70b-versatile";
 
   Map<String, dynamic>? _currentInstance;
   final List<Map<String, String>> _timelineTranscript = [];
@@ -130,82 +117,43 @@ class _SimfarEngineScreenState extends State<SimfarEngineScreen> {
 
     _tts = FlutterTts();
     await _tts.setLanguage("es-CL");
-    await _tts.setSpeechRate(0.48); // Velocidad normal (1x)
+    await _tts.setSpeechRate(0.48); // Velocidad natural humana (1x)
     await _tts.setPitch(1.0);
   }
 
-  // MÉTODO PARA CONSULTAR EL MODELO SELECCIONADO
-  Future<http.Response> _querySelectedGemini(String prompt) async {
-    String modelName = _selectedModel.startsWith("models/") ? _selectedModel : "models/$_selectedModel";
-    String url = "https://generativelanguage.googleapis.com/$_selectedApiVersion/$modelName:generateContent?key=$currentApiKey";
+  // MÉTODO ULTRA VELOZ PARA CONSULTAR A GROQ
+  Future<http.Response> _queryGroq(List<Map<String, String>> messages, {bool isJson = false}) async {
+    if (currentApiKey.trim().isEmpty) {
+      return http.Response('{"error":{"message":"Ingresa tu API Key de Groq tocando la llave 🔑 arriba a la derecha."}}', 401);
+    }
+
+    final Map<String, dynamic> body = {
+      "model": _groqModel,
+      "messages": messages,
+      "temperature": isJson ? 0.2 : 0.6,
+      "max_tokens": isJson ? 600 : 200,
+    };
+
+    if (isJson) {
+      body["response_format"] = {"type": "json_object"};
+    }
 
     return await http.post(
-      Uri.parse(url),
+      Uri.parse("https://api.groq.com/openai/v1/chat/completions"),
       headers: {
+        "Authorization": "Bearer ${currentApiKey.trim()}",
         "Content-Type": "application/json",
-        "x-goog-api-key": currentApiKey,
       },
-      body: jsonEncode({
-        "contents": [
-          {
-            "parts": [{"text": prompt}]
-          }
-        ]
-      }),
-    );
-  }
-
-  // LISTMODELS: Escanear modelos disponibles en la cuenta del usuario
-  Future<void> _fetchOnlineModels(BuildContext dialogContext, StateSetter dialogSetState) async {
-    dialogSetState(() => _isLoadingModels = true);
-
-    try {
-      final res = await http.get(
-        Uri.parse("https://generativelanguage.googleapis.com/$_selectedApiVersion/models?key=$currentApiKey"),
-        headers: {
-          "Content-Type": "application/json",
-          "x-goog-api-key": currentApiKey,
-        },
-      );
-
-      if (res.statusCode == 200) {
-        final data = jsonDecode(res.body);
-        final List models = data['models'] ?? [];
-        final List<String> available = [];
-
-        for (var m in models) {
-          final methods = m['supportedGenerationMethods'] as List?;
-          if (methods != null && methods.contains('generateContent')) {
-            String name = (m['name'] ?? '').replaceFirst('models/', '');
-            if (name.isNotEmpty) available.add(name);
-          }
-        }
-
-        if (available.isNotEmpty) {
-          setState(() {
-            _availableModels = available;
-            if (!_availableModels.contains(_selectedModel)) {
-              _selectedModel = _availableModels.first;
-            }
-          });
-          dialogSetState(() {
-            _isLoadingModels = false;
-          });
-          ScaffoldMessenger.of(context).showSnackBar(
-            SnackBar(content: Text("¡${available.length} modelos compatibles detectados!")),
-          );
-          return;
-        }
-      }
-    } catch (_) {}
-
-    dialogSetState(() => _isLoadingModels = false);
-    ScaffoldMessenger.of(context).showSnackBar(
-      const SnackBar(content: Text("No se pudo escanear. Revisa tu clave o internet.")),
+      body: jsonEncode(body),
     );
   }
 
   void _setupInstance(int semestre) {
+    if (currentApiKey.trim().isEmpty) {
+      _showApiKeyDialog();
+      return;
+    }
+
     int targetNivel = (semestre <= 2) ? 1 : (semestre <= 4 ? 2 : 3);
     var matchedCases = _knowledgeBank.where((c) => c["nivel"] == targetNivel).toList();
     _currentInstance = matchedCases.first;
@@ -282,27 +230,28 @@ class _SimfarEngineScreenState extends State<SimfarEngineScreen> {
       return;
     }
 
-    setState(() => _statusMsg = "El paciente está pensando...");
+    setState(() => _statusMsg = "El paciente está respondiendo...");
 
     String systemPrompt = """
-Eres el simulador de paciente SIMFAR conforme a los documentos oficiales del proyecto.
-Estás en una farmacia en Chile. Debes ceñirte 100% a las siguientes restricciones normativas:
-1. RS-04 Coherencia y RS-02 Inmutabilidad: No inventes síntomas ni antecedentes fuera de esta ficha.
-2. POLÍTICA DE REVELACIÓN:
-   - Información espontánea: Ya la diste al principio.
+Eres el simulador de paciente SIMFAR. Estás en una farmacia comunitaria en Chile.
+NORMAS OBLIGATORIAS:
+1. Responde SIEMPRE Y EXCLUSIVAMENTE en español de Chile con modismos naturales de tu perfil. NUNCA uses inglés.
+2. POLÍTICA DE REVELACIÓN (Doc 01):
+   - Información espontánea: Ya la diste.
    - Información condicionada: ${jsonEncode(_currentInstance!['info_condicionada'])}. Solo la revelas SI el estudiante te la pregunta específicamente.
-   - Información desconocida: "${_currentInstance!['info_desconocida']}". Si te preguntan algo técnico, responde con naturalidad que no sabes.
-3. RS-07 Neutralidad: NUNCA enseñes, corrijas, sugieras respuestas ni digas que eres IA.
-4. PERSONALIDAD: ${_currentInstance!['personalidad']}. Usa modismos chilenos cotidianos propios de tu perfil.
+   - Información desconocida: "${_currentInstance!['info_desconocida']}". Si preguntan algo técnico, di con naturalidad chilena que no sabes.
+3. NEUTRALIDAD: NUNCA enseñes, corrijas, sugieras respuestas ni digas que eres IA.
+4. PERSONALIDAD: ${_currentInstance!['personalidad']}.
 
 Ficha del Paciente: ${_currentInstance!['paciente']}
-Última intervención del estudiante: "$userText"
-
-Responde como paciente chileno en un máximo de 2 oraciones:
+Responde en 1 o 2 oraciones como el paciente frente a lo que te dice el estudiante de farmacia:
 """;
 
     try {
-      final response = await _querySelectedGemini(systemPrompt);
+      final response = await _queryGroq([
+        {"role": "system", "content": systemPrompt},
+        {"role": "user", "content": userText}
+      ]);
 
       if (response.statusCode != 200) {
         String errorDetalle = "Error (${response.statusCode}): ";
@@ -313,14 +262,14 @@ Responde como paciente chileno en un máximo de 2 oraciones:
           errorDetalle += response.body;
         }
         setState(() {
-          _statusMsg = "Error en respuesta del modelo";
+          _statusMsg = "Error en Groq";
           _timelineTranscript.add({"role": "error", "text": errorDetalle});
         });
         return;
       }
 
       var data = jsonDecode(response.body);
-      String reply = data["candidates"][0]["content"]["parts"][0]["text"].trim();
+      String reply = data["choices"][0]["message"]["content"].trim();
 
       _timelineTranscript.add({"role": "paciente", "text": reply});
       setState(() => _statusMsg = "Paciente ha respondido");
@@ -346,7 +295,7 @@ Responde como paciente chileno en un máximo de 2 oraciones:
 
     String evalPrompt = """
 Actúa como el Motor de Evaluación de SIMFAR (Documento 03.7).
-Compara la actuación del estudiante frente a la Resolución Esperada y la Rúbrica de la Biblioteca de Conocimiento chilena.
+Compara la actuación del estudiante frente a la Resolución Esperada y la Rúbrica chilena.
 
 CASO: ${_currentInstance!['nombre']}
 RESOLUCIÓN ESPERADA: ${_currentInstance!['resolucion_esperada']}
@@ -355,23 +304,25 @@ RÚBRICA: ${jsonEncode(_currentInstance!['rubrica'])}
 REGISTRO DE CONVERSACIÓN:
 $fullDialog
 
-Genera la retroalimentación objetiva basada en evidencias en formato JSON exacto:
+Debes responder ÚNICAMENTE un JSON con esta estructura exacta:
 {
   "puntaje": 85,
   "nivel": "Muy Bueno",
-  "competencias_blandas": "Evaluación de saludo, cortesía, escucha activa y empatía.",
-  "competencias_tecnicas": "Evaluación de anamnesis (alergias/patologías) y correcto fármaco entregado conforme a normativa ISP.",
+  "competencias_blandas": "Evaluación de saludo, cortesía y empatía.",
+  "competencias_tecnicas": "Evaluación de preguntas clínicas, descarte de alergias y fármaco entregado según ISP.",
   "errores_criticos": "Listado de contraindicaciones no advertidas o 'Ninguno'.",
   "recomendaciones": "Acciones concretas para su próxima simulación en farmacia."
 }
 """;
 
     try {
-      final res = await _querySelectedGemini(evalPrompt);
+      final res = await _queryGroq([
+        {"role": "system", "content": "Eres un evaluador académico de farmacia. Devuelve exclusivamente JSON válido."},
+        {"role": "user", "content": evalPrompt}
+      ], isJson: true);
 
       var data = jsonDecode(res.body);
-      String rawJson = data["candidates"][0]["content"]["parts"][0]["text"];
-      rawJson = rawJson.replaceAll("```json", "").replaceAll("```", "").trim();
+      String rawJson = data["choices"][0]["message"]["content"].trim();
 
       setState(() {
         _evaluationResult = jsonDecode(rawJson);
@@ -385,114 +336,59 @@ Genera la retroalimentación objetiva basada en evidencias en formato JSON exact
           "nivel": "Bueno",
           "competencias_blandas": "Buena disposición y trato cordial.",
           "competencias_tecnicas": "Se entregó orientación general de farmacia.",
-          "errores_criticos": "Ninguno.",
-          "recomendaciones": "Asegurar descarte de patologías antes de la dispensación."
+          "errores_criticos": "Ninguno detectado.",
+          "recomendaciones": "Profundizar en la anamnesis previa a la entrega."
         };
       });
     }
   }
 
-  // DIÁLOGO CON MENÚ DESPLEGABLE DE MODELOS Y LISTMODELS
-  void _showModelSettingsDialog() {
-    TextEditingController keyController = TextEditingController(text: currentApiKey);
-
+  void _showApiKeyDialog() {
+    TextEditingController controller = TextEditingController(text: currentApiKey);
     showDialog(
       context: context,
-      builder: (ctx) => StatefulBuilder(
-        builder: (context, setDialogState) => AlertDialog(
-          title: const Row(
-            children: [
-              Icon(Icons.tune, color: Colors.teal),
-              SizedBox(width: 8),
-              Text("Ajustes del Modelo IA", style: TextStyle(fontSize: 18)),
-            ],
-          ),
-          content: SingleChildScrollView(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              mainAxisSize: MainAxisSize.min,
-              children: [
-                const Text("Modelo de Gemini:", style: TextStyle(fontWeight: FontWeight.bold)),
-                const SizedBox(height: 6),
-                Container(
-                  padding: const EdgeInsets.symmetric(horizontal: 12),
-                  decoration: BoxDecoration(
-                    border: Border.all(color: Colors.teal),
-                    borderRadius: BorderRadius.circular(8),
-                  ),
-                  child: DropdownButtonHideUnderline(
-                    child: DropdownButton<String>(
-                      isExpanded: true,
-                      value: _availableModels.contains(_selectedModel) ? _selectedModel : _availableModels.first,
-                      items: _availableModels.map((m) => DropdownMenuItem(value: m, child: Text(m))).toList(),
-                      onChanged: (val) {
-                        if (val != null) {
-                          setDialogState(() => _selectedModel = val);
-                          setState(() => _selectedModel = val);
-                        }
-                      },
-                    ),
-                  ),
-                ),
-                const SizedBox(height: 10),
-                
-                // Botón ListModels automático
-                OutlinedButton.icon(
-                  onPressed: _isLoadingModels ? null : () => _fetchOnlineModels(ctx, setDialogState),
-                  icon: _isLoadingModels 
-                      ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2))
-                      : const Icon(Icons.refresh, size: 18),
-                  label: Text(_isLoadingModels ? "Detectando modelos..." : "Escanear modelos de mi cuenta"),
-                ),
-                const Divider(height: 24),
-
-                const Text("Versión de la API:", style: TextStyle(fontWeight: FontWeight.bold)),
-                const SizedBox(height: 6),
-                DropdownButton<String>(
-                  value: _selectedApiVersion,
-                  isExpanded: true,
-                  items: const [
-                    DropdownMenuItem(value: "v1beta", child: Text("v1beta (Recomendado para Gemini 2.0)")),
-                    DropdownMenuItem(value: "v1", child: Text("v1 (Producción Estable)")),
-                  ],
-                  onChanged: (v) {
-                    if (v != null) {
-                      setDialogState(() => _selectedApiVersion = v);
-                      setState(() => _selectedApiVersion = v);
-                    }
-                  },
-                ),
-                const Divider(height: 24),
-
-                const Text("API Key:", style: TextStyle(fontWeight: FontWeight.bold)),
-                const SizedBox(height: 6),
-                TextField(
-                  controller: keyController,
-                  decoration: const InputDecoration(
-                    border: OutlineInputBorder(),
-                    hintText: "Pega tu clave si deseas cambiarla",
-                  ),
-                ),
-              ],
+      builder: (ctx) => AlertDialog(
+        title: const Row(
+          children: [
+            Icon(Icons.vpn_key, color: Colors.teal),
+            SizedBox(width: 8),
+            Text("Clave de API de Groq", style: TextStyle(fontSize: 18)),
+          ],
+        ),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text(
+              "Pega aquí tu clave gratuita de Groq (empieza con 'gsk_'):", 
+              style: TextStyle(fontSize: 13)
             ),
-          ),
-          actions: [
-            TextButton(onPressed: () => Navigator.pop(ctx), child: const Text("Cerrar")),
-            ElevatedButton(
-              style: ElevatedButton.styleFrom(backgroundColor: Colors.teal),
-              onPressed: () {
-                setState(() {
-                  currentApiKey = keyController.text.trim();
-                });
-                Navigator.pop(ctx);
-                ScaffoldMessenger.of(context).showSnackBar(
-                  SnackBar(content: Text("Modelo activo: $_selectedModel ($_selectedApiVersion)")),
-                );
-              },
-              child: const Text("Guardar y Aplicar", style: TextStyle(color: Colors.white)),
+            const SizedBox(height: 10),
+            TextField(
+              controller: controller,
+              decoration: const InputDecoration(
+                border: OutlineInputBorder(),
+                hintText: "gsk_...",
+              ),
             ),
           ],
         ),
+        actions: [
+          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text("Cancelar")),
+          ElevatedButton(
+            style: ElevatedButton.styleFrom(backgroundColor: Colors.teal),
+            onPressed: () {
+              setState(() {
+                currentApiKey = controller.text.trim();
+              });
+              Navigator.pop(ctx);
+              ScaffoldMessenger.of(context).showSnackBar(
+                const SnackBar(content: Text("Clave de Groq guardada con éxito")),
+              );
+            },
+            child: const Text("Guardar", style: TextStyle(color: Colors.white)),
+          ),
+        ],
       ),
     );
   }
@@ -505,9 +401,9 @@ Genera la retroalimentación objetiva basada en evidencias en formato JSON exact
         backgroundColor: Colors.teal.shade800,
         actions: [
           IconButton(
-            icon: const Icon(Icons.tune, color: Colors.white),
-            tooltip: "Seleccionar Modelo",
-            onPressed: _showModelSettingsDialog,
+            icon: const Icon(Icons.vpn_key, color: Colors.white),
+            tooltip: "Configurar Clave Groq",
+            onPressed: _showApiKeyDialog,
           )
         ],
       ),
@@ -530,23 +426,46 @@ Genera la retroalimentación objetiva basada en evidencias en formato JSON exact
               const Icon(Icons.medical_services, size: 80, color: Colors.teal),
               const SizedBox(height: 20),
               const Text("SIMFAR Chile", style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold)),
-              const Text("Simulador Conversacional de Farmacia", style: TextStyle(color: Colors.grey)),
-              const SizedBox(height: 12),
-              
-              // CHIP INDICADOR DE MODELO SELECCIONADO
-              ActionChip(
-                avatar: const Icon(Icons.psychology, size: 18, color: Colors.teal),
-                label: Text("Modelo: $_selectedModel ($_selectedApiVersion)"),
-                onPressed: _showModelSettingsDialog,
-              ),
+              const Text("Motor: Groq Llama 3.3 (Ultra Rápido)", style: TextStyle(color: Colors.grey)),
+              const SizedBox(height: 20),
+
+              if (currentApiKey.trim().isEmpty)
+                Container(
+                  margin: const EdgeInsets.symmetric(horizontal: 20),
+                  padding: const EdgeInsets.all(12),
+                  decoration: BoxDecoration(
+                    color: Colors.amber.shade50,
+                    borderRadius: BorderRadius.circular(8),
+                    border: Border.all(color: Colors.amber.shade700),
+                  ),
+                  child: Row(
+                    children: [
+                      Icon(Icons.info, color: Colors.amber.shade900),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Text(
+                          "Toca la llave 🔑 arriba a la derecha para ingresar tu clave gratuita de Groq.",
+                          style: TextStyle(color: Colors.amber.shade900, fontSize: 13),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+
               const SizedBox(height: 24),
               ElevatedButton.icon(
                 icon: const Icon(Icons.play_arrow, color: Colors.white),
                 style: ElevatedButton.styleFrom(
-                  backgroundColor: Colors.teal.shade700, 
-                  padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12)
+                  backgroundColor: Colors.teal.shade700,
+                  padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12),
                 ),
-                onPressed: () => setState(() => _state = FSMState.configuracion),
+                onPressed: () {
+                  if (currentApiKey.trim().isEmpty) {
+                    _showApiKeyDialog();
+                  } else {
+                    setState(() => _state = FSMState.configuracion);
+                  }
+                },
                 label: const Text("Iniciar Simulación", style: TextStyle(color: Colors.white, fontSize: 16)),
               )
             ],
