@@ -35,6 +35,18 @@ class _SimfarEngineScreenState extends State<SimfarEngineScreen> {
   String _recognizedText = "";
   String _statusMsg = "Listo para iniciar simulación";
   
+  // SELECTOR DINÁMICO DE MODELOS
+  List<String> _availableModels = [
+    "gemini-2.0-flash",
+    "gemini-1.5-flash",
+    "gemini-1.5-flash-latest",
+    "gemini-1.5-pro",
+    "gemini-2.0-flash-exp",
+  ];
+  String _selectedModel = "gemini-2.0-flash";
+  String _selectedApiVersion = "v1beta";
+  bool _isLoadingModels = false;
+
   Map<String, dynamic>? _currentInstance;
   final List<Map<String, String>> _timelineTranscript = [];
   Map<String, dynamic>? _evaluationResult;
@@ -118,8 +130,79 @@ class _SimfarEngineScreenState extends State<SimfarEngineScreen> {
 
     _tts = FlutterTts();
     await _tts.setLanguage("es-CL");
-    await _tts.setSpeechRate(0.48); // Velocidad normal humana (1x)
+    await _tts.setSpeechRate(0.48); // Velocidad normal (1x)
     await _tts.setPitch(1.0);
+  }
+
+  // MÉTODO PARA CONSULTAR EL MODELO SELECCIONADO
+  Future<http.Response> _querySelectedGemini(String prompt) async {
+    String modelName = _selectedModel.startsWith("models/") ? _selectedModel : "models/$_selectedModel";
+    String url = "https://generativelanguage.googleapis.com/$_selectedApiVersion/$modelName:generateContent?key=$currentApiKey";
+
+    return await http.post(
+      Uri.parse(url),
+      headers: {
+        "Content-Type": "application/json",
+        "x-goog-api-key": currentApiKey,
+      },
+      body: jsonEncode({
+        "contents": [
+          {
+            "parts": [{"text": prompt}]
+          }
+        ]
+      }),
+    );
+  }
+
+  // LISTMODELS: Escanear modelos disponibles en la cuenta del usuario
+  Future<void> _fetchOnlineModels(BuildContext dialogContext, StateSetter dialogSetState) async {
+    dialogSetState(() => _isLoadingModels = true);
+
+    try {
+      final res = await http.get(
+        Uri.parse("https://generativelanguage.googleapis.com/$_selectedApiVersion/models?key=$currentApiKey"),
+        headers: {
+          "Content-Type": "application/json",
+          "x-goog-api-key": currentApiKey,
+        },
+      );
+
+      if (res.statusCode == 200) {
+        final data = jsonDecode(res.body);
+        final List models = data['models'] ?? [];
+        final List<String> available = [];
+
+        for (var m in models) {
+          final methods = m['supportedGenerationMethods'] as List?;
+          if (methods != null && methods.contains('generateContent')) {
+            String name = (m['name'] ?? '').replaceFirst('models/', '');
+            if (name.isNotEmpty) available.add(name);
+          }
+        }
+
+        if (available.isNotEmpty) {
+          setState(() {
+            _availableModels = available;
+            if (!_availableModels.contains(_selectedModel)) {
+              _selectedModel = _availableModels.first;
+            }
+          });
+          dialogSetState(() {
+            _isLoadingModels = false;
+          });
+          ScaffoldMessenger.of(context).showSnackBar(
+            SnackBar(content: Text("¡${available.length} modelos compatibles detectados!")),
+          );
+          return;
+        }
+      }
+    } catch (_) {}
+
+    dialogSetState(() => _isLoadingModels = false);
+    ScaffoldMessenger.of(context).showSnackBar(
+      const SnackBar(content: Text("No se pudo escanear. Revisa tu clave o internet.")),
+    );
   }
 
   void _setupInstance(int semestre) {
@@ -138,44 +221,6 @@ class _SimfarEngineScreenState extends State<SimfarEngineScreen> {
     _speak(firstLine);
   }
 
-  // MÉTODO MULTI-RUTA INTELIGENTE PARA GEMINI
-  Future<http.Response> _queryGemini(String prompt) async {
-    final List<String> endpoints = [
-      "https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent", // Endpoint oficial v1
-      "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent", // Versión 2.0
-      "https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash-latest:generateContent",
-      "https://generativelanguage.googleapis.com/v1/models/gemini-pro:generateContent"
-    ];
-
-    http.Response? lastResponse;
-
-    for (final url in endpoints) {
-      try {
-        final res = await http.post(
-          Uri.parse("$url?key=$currentApiKey"),
-          headers: {
-            "Content-Type": "application/json",
-            "x-goog-api-key": currentApiKey,
-          },
-          body: jsonEncode({
-            "contents": [
-              {
-                "parts": [{"text": prompt}]
-              }
-            ]
-          }),
-        );
-
-        if (res.statusCode == 200) {
-          return res;
-        }
-        lastResponse = res;
-      } catch (_) {}
-    }
-
-    return lastResponse ?? http.Response('{"error":{"message":"Error de conexión con Gemini"}}', 500);
-  }
-
   void _startListening() async {
     if (_isListening) return;
 
@@ -183,7 +228,7 @@ class _SimfarEngineScreenState extends State<SimfarEngineScreen> {
     bool available = await _speech.initialize();
     if (!available) {
       ScaffoldMessenger.of(context).showSnackBar(
-        const SnackBar(content: Text("Error: Permiso de micrófono no habilitado")),
+        const SnackBar(content: Text("Permiso de micrófono no habilitado")),
       );
       return;
     }
@@ -257,7 +302,7 @@ Responde como paciente chileno en un máximo de 2 oraciones:
 """;
 
     try {
-      final response = await _queryGemini(systemPrompt);
+      final response = await _querySelectedGemini(systemPrompt);
 
       if (response.statusCode != 200) {
         String errorDetalle = "Error (${response.statusCode}): ";
@@ -268,7 +313,7 @@ Responde como paciente chileno en un máximo de 2 oraciones:
           errorDetalle += response.body;
         }
         setState(() {
-          _statusMsg = "Error de respuesta";
+          _statusMsg = "Error en respuesta del modelo";
           _timelineTranscript.add({"role": "error", "text": errorDetalle});
         });
         return;
@@ -322,7 +367,7 @@ Genera la retroalimentación objetiva basada en evidencias en formato JSON exact
 """;
 
     try {
-      final res = await _queryGemini(evalPrompt);
+      final res = await _querySelectedGemini(evalPrompt);
 
       var data = jsonDecode(res.body);
       String rawJson = data["candidates"][0]["content"]["parts"][0]["text"];
@@ -347,41 +392,107 @@ Genera la retroalimentación objetiva basada en evidencias en formato JSON exact
     }
   }
 
-  void _showApiKeyDialog() {
-    TextEditingController controller = TextEditingController(text: currentApiKey);
+  // DIÁLOGO CON MENÚ DESPLEGABLE DE MODELOS Y LISTMODELS
+  void _showModelSettingsDialog() {
+    TextEditingController keyController = TextEditingController(text: currentApiKey);
+
     showDialog(
       context: context,
-      builder: (ctx) => AlertDialog(
-        title: const Text("Configuración de API Key"),
-        content: Column(
-          mainAxisSize: MainAxisSize.min,
-          children: [
-            const Text("Clave activa actual:", style: TextStyle(fontSize: 13)),
-            const SizedBox(height: 10),
-            TextField(
-              controller: controller,
-              decoration: const InputDecoration(
-                border: OutlineInputBorder(),
-                hintText: "Pega tu clave de Gemini",
-              ),
+      builder: (ctx) => StatefulBuilder(
+        builder: (context, setDialogState) => AlertDialog(
+          title: const Row(
+            children: [
+              Icon(Icons.tune, color: Colors.teal),
+              SizedBox(width: 8),
+              Text("Ajustes del Modelo IA", style: TextStyle(fontSize: 18)),
+            ],
+          ),
+          content: SingleChildScrollView(
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                const Text("Modelo de Gemini:", style: TextStyle(fontWeight: FontWeight.bold)),
+                const SizedBox(height: 6),
+                Container(
+                  padding: const EdgeInsets.symmetric(horizontal: 12),
+                  decoration: BoxDecoration(
+                    border: Border.all(color: Colors.teal),
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                  child: DropdownButtonHideUnderline(
+                    child: DropdownButton<String>(
+                      isExpanded: true,
+                      value: _availableModels.contains(_selectedModel) ? _selectedModel : _availableModels.first,
+                      items: _availableModels.map((m) => DropdownMenuItem(value: m, child: Text(m))).toList(),
+                      onChanged: (val) {
+                        if (val != null) {
+                          setDialogState(() => _selectedModel = val);
+                          setState(() => _selectedModel = val);
+                        }
+                      },
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 10),
+                
+                // Botón ListModels automático
+                OutlinedButton.icon(
+                  onPressed: _isLoadingModels ? null : () => _fetchOnlineModels(ctx, setDialogState),
+                  icon: _isLoadingModels 
+                      ? const SizedBox(width: 16, height: 16, child: CircularProgressIndicator(strokeWidth: 2))
+                      : const Icon(Icons.refresh, size: 18),
+                  label: Text(_isLoadingModels ? "Detectando modelos..." : "Escanear modelos de mi cuenta"),
+                ),
+                const Divider(height: 24),
+
+                const Text("Versión de la API:", style: TextStyle(fontWeight: FontWeight.bold)),
+                const SizedBox(height: 6),
+                DropdownButton<String>(
+                  value: _selectedApiVersion,
+                  isExpanded: true,
+                  items: const [
+                    DropdownMenuItem(value: "v1beta", child: Text("v1beta (Recomendado para Gemini 2.0)")),
+                    DropdownMenuItem(value: "v1", child: Text("v1 (Producción Estable)")),
+                  ],
+                  onChanged: (v) {
+                    if (v != null) {
+                      setDialogState(() => _selectedApiVersion = v);
+                      setState(() => _selectedApiVersion = v);
+                    }
+                  },
+                ),
+                const Divider(height: 24),
+
+                const Text("API Key:", style: TextStyle(fontWeight: FontWeight.bold)),
+                const SizedBox(height: 6),
+                TextField(
+                  controller: keyController,
+                  decoration: const InputDecoration(
+                    border: OutlineInputBorder(),
+                    hintText: "Pega tu clave si deseas cambiarla",
+                  ),
+                ),
+              ],
+            ),
+          ),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(ctx), child: const Text("Cerrar")),
+            ElevatedButton(
+              style: ElevatedButton.styleFrom(backgroundColor: Colors.teal),
+              onPressed: () {
+                setState(() {
+                  currentApiKey = keyController.text.trim();
+                });
+                Navigator.pop(ctx);
+                ScaffoldMessenger.of(context).showSnackBar(
+                  SnackBar(content: Text("Modelo activo: $_selectedModel ($_selectedApiVersion)")),
+                );
+              },
+              child: const Text("Guardar y Aplicar", style: TextStyle(color: Colors.white)),
             ),
           ],
         ),
-        actions: [
-          TextButton(onPressed: () => Navigator.pop(ctx), child: const Text("Cancelar")),
-          ElevatedButton(
-            onPressed: () {
-              setState(() {
-                currentApiKey = controller.text.trim();
-              });
-              Navigator.pop(ctx);
-              ScaffoldMessenger.of(context).showSnackBar(
-                const SnackBar(content: Text("Clave guardada")),
-              );
-            },
-            child: const Text("Guardar"),
-          ),
-        ],
       ),
     );
   }
@@ -394,9 +505,9 @@ Genera la retroalimentación objetiva basada en evidencias en formato JSON exact
         backgroundColor: Colors.teal.shade800,
         actions: [
           IconButton(
-            icon: const Icon(Icons.key, color: Colors.white),
-            tooltip: "Configurar API Key",
-            onPressed: _showApiKeyDialog,
+            icon: const Icon(Icons.tune, color: Colors.white),
+            tooltip: "Seleccionar Modelo",
+            onPressed: _showModelSettingsDialog,
           )
         ],
       ),
@@ -420,10 +531,21 @@ Genera la retroalimentación objetiva basada en evidencias en formato JSON exact
               const SizedBox(height: 20),
               const Text("SIMFAR Chile", style: TextStyle(fontSize: 24, fontWeight: FontWeight.bold)),
               const Text("Simulador Conversacional de Farmacia", style: TextStyle(color: Colors.grey)),
-              const SizedBox(height: 30),
+              const SizedBox(height: 12),
+              
+              // CHIP INDICADOR DE MODELO SELECCIONADO
+              ActionChip(
+                avatar: const Icon(Icons.psychology, size: 18, color: Colors.teal),
+                label: Text("Modelo: $_selectedModel ($_selectedApiVersion)"),
+                onPressed: _showModelSettingsDialog,
+              ),
+              const SizedBox(height: 24),
               ElevatedButton.icon(
                 icon: const Icon(Icons.play_arrow, color: Colors.white),
-                style: ElevatedButton.styleFrom(backgroundColor: Colors.teal.shade700, padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12)),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: Colors.teal.shade700, 
+                  padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 12)
+                ),
                 onPressed: () => setState(() => _state = FSMState.configuracion),
                 label: const Text("Iniciar Simulación", style: TextStyle(color: Colors.white, fontSize: 16)),
               )
